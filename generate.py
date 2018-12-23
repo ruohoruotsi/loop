@@ -5,11 +5,10 @@
 # LICENSE file in the root directory of this source tree.
 
 import os
-import nltk
 import argparse
-import random
 import numpy as np
-from string import digits
+import phonemizer
+import string
 
 import torch
 from torch.autograd import Variable
@@ -40,21 +39,21 @@ if args.gpu >= 0:
 
 
 def text2phone(text, char2code):
-    cmudict = nltk.corpus.cmudict.dict()
+    seperator = phonemizer.separator.Separator('', '', ' ')
+    ph = phonemizer.phonemize(text, separator=seperator)
+    ph = ph.split(' ')
+    ph.remove('')
 
-    result = []
-    for word in text.split():
-        result += random.choice(cmudict[word])
-    result = [str(ph.lower()).translate(None, digits) for ph in result]
-    result = [char2code[ph] for ph in result]
-
+    result = [char2code[p] for p in ph]
     return torch.LongTensor(result)
 
 
 def trim_pred(out, attn):
     tq = attn.abs().sum(1).data
-    for stopi in range(tq.size(0) - 1, -1, -1):
-        if tq[stopi][0] > 0.5:
+
+    for stopi in range(1, tq.size(0)):
+        col_sum = attn[:stopi, :].abs().sum(0).data.squeeze()
+        if tq[stopi][0] < 0.5 and col_sum[-1] > 4:
             break
 
     out = out[:stopi, :]
@@ -81,11 +80,23 @@ def main():
     opt = torch.load(os.path.dirname(args.checkpoint) + '/args.pth')
     train_args = opt[0]
 
-    train_dataset = NpzFolder(train_args.data + '/numpy_features')
-    char2code = train_dataset.dict
-    spkr2code = train_dataset.speakers
+    char2code = {'aa': 0, 'ae': 1, 'ah': 2, 'ao': 3, 'aw': 4, 'ax': 5,  'ay': 6,
+                 'b': 7, 'ch': 8, 'd': 9, 'dh': 10, 'eh': 11, 'er': 12, 'ey': 13,
+                 'f': 14, 'g': 15, 'hh': 16, 'i': 17, 'ih': 18, 'iy': 19, 'jh': 20,
+                 'k': 21, 'l': 22, 'm': 23, 'n': 24, 'ng': 25, 'ow': 26, 'oy': 27,
+                 'p': 28, 'pau': 29, 'r': 30, 's': 31, 'sh': 32, 'ssil': 33,
+                 't': 34, 'th': 35, 'uh': 36, 'uw': 37, 'v': 38, 'w': 39, 'y': 40,
+                 'z': 41}
+    nspkr = train_args.nspk
 
-    norm_path = train_args.data + '/norm_info/norm.dat'
+    norm_path = None
+    if os.path.exists(train_args.data + '/norm_info/norm.dat'):
+        norm_path = train_args.data + '/norm_info/norm.dat'
+    elif os.path.exists(os.path.dirname(args.checkpoint) + '/norm.dat'):
+        norm_path = os.path.dirname(args.checkpoint) + '/norm.dat'
+    else:
+        print('ERROR: Failed to find norm file.')
+        return
     train_args.noise = 0
 
     model = Loop(train_args)
@@ -94,7 +105,7 @@ def main():
         model.cuda()
     model.eval()
 
-    if args.spkr not in range(len(spkr2code)):
+    if args.spkr not in range(nspkr):
         print('ERROR: Unknown speaker id: %d.' % args.spkr)
         return
 
@@ -110,14 +121,18 @@ def main():
         output_fname = fname + '.gen_' + str(args.spkr)
     elif args.text is not '':
         txt = text2phone(args.text, char2code)
-        feat = torch.FloatTensor(500, 63)
+        feat = torch.FloatTensor(txt.size(0)*20, 63)
         spkr = torch.LongTensor([args.spkr])
 
         txt = Variable(txt.unsqueeze(1), volatile=True)
         feat = Variable(feat.unsqueeze(1), volatile=True)
         spkr = Variable(spkr, volatile=True)
 
+        # slugify input string to file name
         fname = args.text.replace(' ', '_')
+        valid_chars = "-_.() %s%s" % (string.ascii_letters, string.digits)
+        fname = ''.join(c for c in fname if c in valid_chars)
+
         output_fname = fname + '.gen_' + str(args.spkr)
     else:
         print('ERROR: Must supply npz file path or text as source.')
